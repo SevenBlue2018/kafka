@@ -35,16 +35,22 @@ import scala.collection.mutable.ArrayBuffer
 
 class LogSegmentTest {
 
+  // 定义final变量，含义为TopicPartition对象，主题为topic，partition为0
   val topicPartition = new TopicPartition("topic", 0)
+  // 定义final变量，含义为segments数组
   val segments = mutable.ArrayBuffer[LogSegment]()
+  // 定义普通变量，含义为log日志目录(File类型)
   var logDir: File = _
 
   /* create a segment with the given base offset */
   def createSegment(offset: Long,
                     indexIntervalBytes: Int = 10,
                     time: Time = Time.SYSTEM): LogSegment = {
+    // 创建一个Segment对象
     val seg = LogUtils.createSegment(offset, logDir, indexIntervalBytes, time)
+    // 保存到segments数组中
     segments += seg
+    // 返回该segment对象
     seg
   }
 
@@ -56,12 +62,15 @@ class LogSegmentTest {
 
   @Before
   def setup(): Unit = {
+    // 创建log目录
     logDir = TestUtils.tempDir()
   }
 
   @After
   def teardown(): Unit = {
+    // 循环关闭segments
     segments.foreach(_.close())
+    // 删除log目录
     Utils.delete(logDir)
   }
 

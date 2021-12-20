@@ -53,14 +53,15 @@ import scala.math._
  * @param time The time instance
  */
 @nonthreadsafe
-class LogSegment private[log] (val log: FileRecords,
-                               val lazyOffsetIndex: LazyIndex[OffsetIndex],
-                               val lazyTimeIndex: LazyIndex[TimeIndex],
-                               val txnIndex: TransactionIndex,
-                               val baseOffset: Long,
-                               val indexIntervalBytes: Int,
-                               val rollJitterMs: Long,
-                               val time: Time) extends Logging {
+class LogSegment private[log] (val log: FileRecords, // 消息日志文件，实际保存 Kafka 消息的对象
+                               val lazyOffsetIndex: LazyIndex[OffsetIndex], // 位移索引文件
+                               val lazyTimeIndex: LazyIndex[TimeIndex], // 时间戳索引文件
+                               val txnIndex: TransactionIndex, // 已中止事务索引文件
+                               val baseOffset: Long, // // 每个日志段对象保存自己的起始位移 baseOffset，你在磁盘上看到的文件名就是 baseOffset 的值。每个 LogSegment 对象实例一旦被创建，它的起始位移就是固定的了，不能再被更改。
+                               val indexIntervalBytes: Int, // OffSetIndex文件中新增一条索引项的大小
+                               val rollJitterMs: Long, // 日志段对象新增倒计时的“扰动值”
+                               val time: Time // 用于统计计时的一个实现类，在 Kafka 源码中普遍出现
+                              ) extends Logging {
 
   def offsetIndex: OffsetIndex = lazyOffsetIndex.get
 
@@ -141,29 +142,41 @@ class LogSegment private[log] (val log: FileRecords,
    * @throws LogSegmentOffsetOverflowException if the largest offset causes index offset overflow
    */
   @nonthreadsafe
-  def append(largestOffset: Long,
-             largestTimestamp: Long,
-             shallowOffsetOfMaxTimestamp: Long,
-             records: MemoryRecords): Unit = {
-    if (records.sizeInBytes > 0) {
+  def append(largestOffset: Long, // 待写入消息批次中消息的最大位移值
+             largestTimestamp: Long, // 最大时间戳
+             shallowOffsetOfMaxTimestamp: Long, // 最大时间戳对应消息的位移
+             records: MemoryRecords): Unit = { // 真正要写入的消息集合
+    // TODO: 怎么理解
+    if (records.sizeInBytes > 0) { // 判断该日志段是否为空，如果是空的话， Kafka 需要记录要写入消息集合的最大时间戳，并将其作为后面新增日志段倒计时的依据
       trace(s"Inserting ${records.sizeInBytes} bytes at end offset $largestOffset at position ${log.sizeInBytes} " +
-            s"with largest timestamp $largestTimestamp at shallow offset $shallowOffsetOfMaxTimestamp")
+        s"with largest timestamp $largestTimestamp at shallow offset $shallowOffsetOfMaxTimestamp")
       val physicalPosition = log.sizeInBytes()
       if (physicalPosition == 0)
         rollingBasedTimestamp = Some(largestTimestamp)
 
+      // 确保输入参数最大位移值是合法的
+      // 看它与日志段起始位移的差值是否在整数范围内，即 largestOffset - baseOffset 的值是不是介于 [0，Int.MAXVALUE] 之间。
+      // 在极个别的情况下，这个差值可能会越界，这时，append 方法就会抛出异常，阻止后续的消息写入。
+      // 一旦你碰到这个问题，你需要做的是升级你的 Kafka 版本，因为这是由已知的 Bug 导致的。
       ensureOffsetInRange(largestOffset)
 
       // append the messages
+      // 调用 FileRecords 的 append 方法执行真正的写入
+      // 它的工作是将内存中的消息对象写入到操作系统的页缓存
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
       if (largestTimestamp > maxTimestampSoFar) {
+        // 更新日志段的最大时间戳
         maxTimestampSoFar = largestTimestamp
+        // 更新日志段最大时间戳所属消息的位移值属性
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
+        // 还记得 Broker 端提供定期删除日志的功能吗？比如我只想保留最近 7 天的日志，没错，当前最大时间戳这个值就是判断的依据；
+        // 而最大时间戳对应的消息的位移值则用于时间戳索引项。
       }
       // append an entry to the index (if needed)
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+        // 更新索引项和写入的字节数了
         offsetIndex.append(largestOffset, physicalPosition)
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
         bytesSinceLastIndexEntry = 0
@@ -288,10 +301,11 @@ class LogSegment private[log] (val log: FileRecords,
    *         or null if the startOffset is larger than the largest offset in this log
    */
   @threadsafe
-  def read(startOffset: Long,
-           maxSize: Int,
-           maxPosition: Long = size,
-           minOneMessage: Boolean = false): FetchDataInfo = {
+  def read(startOffset: Long, // 要读取的第一条消息的位移
+           maxSize: Int, // 能读取的最大字节数
+           maxPosition: Long = size, // 能读到的最大文件位置
+           minOneMessage: Boolean = false // 是否允许在消息体过大时至少返回第一条消息
+          ): FetchDataInfo = {
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
